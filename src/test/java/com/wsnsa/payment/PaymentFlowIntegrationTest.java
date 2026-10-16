@@ -269,6 +269,13 @@ class PaymentFlowIntegrationTest {
     @Test
     void disabledProviderAndValidation() throws Exception {
         Merchant m = createMerchant("DISABLED");
+        for (String bad : new String[]{"<TOKI_BASE_URL>", "ftp://x", "localhost:8080"}) {
+            mvc.perform(put("/admin/v1/merchants/" + m.id() + "/providers/TOKI").header("X-Admin-Key", ADMIN)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"enabled\":true,\"config\":{\"baseUrl\":\"" + bad + "\",\"merchantId\":\"M\",\"token\":\"T\"}}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("invalid_config"));
+        }
         createInvoice(m, "{\"provider\":\"HIPAY\",\"externalRef\":\"h-1\",\"amount\":1000}")
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("provider_not_enabled"));

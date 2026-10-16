@@ -44,6 +44,9 @@ public class HttpSupport {
             throw new ProviderException(provider + " HTTP " + e.getStatusCode().value() + ": " + errorMessage(e.getResponseBodyAsString()), e);
         } catch (org.springframework.web.client.ResourceAccessException e) {
             throw new ProviderException(provider + " unreachable: " + e.getMessage(), e);
+        } catch (IllegalArgumentException e) {
+            // Merchant-ийн тохиргоонд буруу baseUrl (жишээ нь scheme-гүй) байвал 500 биш provider_error буцаана.
+            throw new ProviderException(provider + " has an invalid URL in its configuration: " + e.getMessage(), e);
         }
     }
 

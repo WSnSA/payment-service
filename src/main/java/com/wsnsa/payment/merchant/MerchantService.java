@@ -9,6 +9,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -103,6 +105,10 @@ public class MerchantService {
             n.setProvider(provider);
             return n;
         });
+        String baseUrl = req.config().get("baseUrl");
+        if (baseUrl == null || !isHttpUrl(baseUrl)) {
+            throw ApiException.badRequest("invalid_config", "config.baseUrl must be an absolute http(s) URL");
+        }
         Map<String, String> old = c.getConfig() == null ? Map.of() : readConfig(c);
         Map<String, String> merged = new LinkedHashMap<>();
         req.config().forEach((k, v) -> {
@@ -134,6 +140,16 @@ public class MerchantService {
         Map<String, String> m = json.read(c.getConfig(), new TypeReference<Map<String, String>>() {
         });
         return m == null ? Map.of() : m;
+    }
+
+    private static boolean isHttpUrl(String value) {
+        try {
+            URI uri = new URI(value);
+            return ("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                    && uri.getHost() != null;
+        } catch (URISyntaxException e) {
+            return false;
+        }
     }
 
     private Merchant find(String id) {

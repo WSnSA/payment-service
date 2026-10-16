@@ -49,7 +49,9 @@ export PAYMENT_ENCRYPTION_KEY=$(openssl rand -base64 32)   # алдвал хад
 ./gradlew bootRun
 ```
 
-Swagger UI: `/swagger-ui.html`. DB schema-г Flyway үүсгэнэ: PostgreSQL → `db/migration/postgresql`, Oracle → `db/migration/oracle`.
+Swagger UI: `/swagger-ui.html`.
+
+Postman: [`docs/postman/payment-service.postman_collection.json`](docs/postman/payment-service.postman_collection.json) болон environment файлыг import хийнэ. Хүсэлт бүр тайлбартай; бүх folder-ийг дарааллаар нь **Run collection**-оор ажиллуулж болно (`Provider бүрийн жишээ`-г бодит гэрээгүйгээр алгасна). DB schema-г Flyway үүсгэнэ: PostgreSQL → `db/migration/postgresql`, Oracle → `db/migration/oracle`.
 
 ### Тохиргоо (env)
 

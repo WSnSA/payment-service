@@ -1,0 +1,2063 @@
+{
+  "info": {
+    "_postman_id": "f689b0e3-4189-55a4-9cb4-72eff8ec3380",
+    "name": "Payment Service API",
+    "description": "# Payment Service API\n\nОлон системд дахин ашиглах **төлбөрийн нэхэмжлэх + И-баримт** сервис. Шинэ сервис бичилгүйгээр дараах үйлчилгээнүүдийг шууд ашиглана:\n\n| # | Үйлчилгээ | Хэсэг |\n|---|---|---|\n| 1 | **Төлбөрийн нэхэмжлэх**: QPay, HiPay, Голомт карт, SocialPay, Toki, MonPay, DigiPay | 2. Төлбөр |\n| 2 | **Төлбөр баталгаажуулалт**: provider-оос шалгаж PAID болгох, хуурамч webhook-оос хамгаалах, давхар цэнэглэлтээс сэргийлэх | автомат |\n| 3 | **И-баримт**: төлбөр бүрт автоматаар эсвэл гараар (бэлэн, сарын нэгтгэл), B2C/B2B, буцаалт | 3. И-баримт |\n| 4 | **ebarimt лавлагаа**: регистрээр ТТД, иргэний дугаар шалгах, аймаг/дүүргийн код | 3. И-баримт |\n| 5 | **PosAPI удирдлага**: сугалааны үлдэгдэл, sendData (өдөр бүр автомат) | 3. И-баримт |\n| 6 | **Мэдэгдэл (webhook)**: `invoice.paid`, `receipt.issued` г.м гарын үсэгтэй, дахин оролдлоготой | доор |\n| 7 | **Sandbox**: мөнгө хөдлөхгүйгээр бүх урсгалыг турших | 4. Sandbox |\n\n## Эхлэх\n\n1. `Payment Service — Local` environment-ийг import хийгээд `baseUrl`, `adminKey`-г тохируулна.\n2. `1. Admin → Merchant бүртгэх`: `apiKey` автоматаар хадгалагдана.\n3. `2. Төлбөр → Нэхэмжлэх үүсгэх (SANDBOX)`, дараа нь `4. Sandbox → SANDBOX нэхэмжлэх төлөх`.\n4. Бодит төлбөрт: `1. Admin → Provider тохиргоо хадгалах`, дараа нь `Provider бүрийн жишээ`.\n\nБүх folder-ийг дарааллаар нь **Run collection**-оор ажиллуулж болно. `Provider бүрийн жишээ` болон ebarimt.mn лавлагааг бодит гэрээ, сүлжээгүйгээр алгасна.\n\n## Нэвтрэлт\n\n| Header | Хэн | Хаана |\n|---|---|---|\n| `X-Admin-Key` | Сервисийн админ | `/admin/**` |\n| `X-API-Key` | Клиент систем (merchant) | `/api/**` |\n| — | Provider-ууд, мониторинг | `/webhooks/**`, `/sandbox/**`, `/actuator/health` |\n\nMerchant бүр зөвхөн өөрийн нэхэмжлэх, баримтыг харна.\n\n## Алдааны хариу\n\n```json\n{\"code\": \"duplicate_external_ref\", \"message\": \"...\", \"details\": {\"amount\": \"...\"}}\n```\n\n| HTTP | Утга |\n|---|---|\n| 400 | Буруу хүсэлт (`validation_error`, `receipt_amount_mismatch`, `customer_tin_required`) |\n| 401 | API key байхгүй эсвэл буруу |\n| 404 | Олдсонгүй (өөр merchant-ийнх ч мөн 404) |\n| 409 | `duplicate_external_ref`, `already_paid`, `invalid_state` |\n| 422 | Тохиргоо дутуу (`provider_not_enabled`, `ebarimt_not_configured`, `ebarimt_disabled`) |\n| 502 | Provider/PosAPI алдаа (`provider_error`) |\n\n## Клиент системд очих webhook мэдэгдэл\n\n`POST {merchant.webhookUrl}`. Header-үүд:\n- `X-Payment-Event`: event-ийн төрөл\n- `X-Payment-Event-Id`: давхардал шүүх id\n- `X-Payment-Signature: t=<unix>,v1=<hex>`\n\n```json\n{\n  \"id\": \"evt-uuid\",\n  \"type\": \"invoice.paid\",\n  \"createdAt\": \"2026-10-01T05:33:45Z\",\n  \"data\": {\n    \"invoiceId\": \"...\", \"externalRef\": \"order-1\", \"provider\": \"QPAY\", \"status\": \"PAID\",\n    \"amount\": 5000, \"paidAmount\": 5000, \"providerTxnId\": \"...\", \"paidAt\": \"...\",\n    \"metadata\": {\"accountId\": \"A-1001\"}, \"receiptId\": \"...\"\n  }\n}\n```\n\n**Event-үүд:**\n- `invoice.paid`\n- `invoice.failed`\n- `invoice.expired`\n- `receipt.issued`: `ddtd`, `lottery`, `qrData`, `totalVat` агуулна\n- `receipt.failed`\n- `receipt.returned`\n\n**Хүлээн авах тал:**\n1. Гарын үсгийг шалгана: `v1 == hex(HMAC_SHA256(webhookSecret, t + \".\" + rawBody))`.\n2. `t` нь 5 минутаас хуучин биш эсэхийг шалгана.\n3. `id`-аар давхардлыг шүүнэ.\n4. 2xx буцаана.\n\n2xx биш хариу авбал 1м, 5м, 15м, 1ц, 3ц, 6ц, 12ц, 24ц завсартай дахин илгээнэ.\n\n```js\n// Node.js\nconst crypto = require('crypto');\nfunction verify(secret, header, rawBody) {\n  const { t, v1 } = Object.fromEntries(header.split(',').map(p => p.split('=')));\n  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;\n  const expected = crypto.createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');\n  return crypto.timingSafeEqual(Buffer.from(v1), Buffer.from(expected));\n}\n```",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Admin — Merchant бүртгэл",
+      "description": "Сервисийг ашиглах **клиент систем бүрийг (merchant)** бүртгэж, тохируулна. Энэ хэсгийг зөвхөн сервисийн админ ашиглана.\n\n**Нэвтрэх:** `X-Admin-Key: {{adminKey}}`. Утга нь сервисийн `PAYMENT_ADMIN_API_KEY` орчны хувьсагч.\n\n**Дараалал:**\n1. Merchant бүртгэнэ. Хариуны `apiKey` болон `webhookSecret` автоматаар environment-д хадгалагдана.\n2. Ашиглах provider бүрийн тохиргоог хадгална.\n3. Хэрэгтэй бол ebarimt тохиргоог шинэчилнэ.",
+      "item": [
+        {
+          "name": "Merchant бүртгэх",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants"
+              ]
+            },
+            "description": "Шинэ клиент систем бүртгэнэ.\n\n**Хариу:** `merchant`, `apiKey`, `webhookSecret`.\n- **`apiKey` болон `webhookSecret` зөвхөн энэ хариунд нэг удаа харагдана.** DB-д apiKey-ийн зөвхөн SHA-256 хадгалагдана.\n- Test script эдгээрийг `merchantId`, `apiKey`, `webhookSecret` environment хувьсагчид автоматаар хадгална.\n\n**Талбарууд:**\n- `code`: давтагдашгүй код (`A-Z a-z 0-9 _ -`).\n- `webhookUrl`: төлбөр төлөгдөх, баримт гарах үед мэдэгдэл хүлээн авах URL. Хоосон бол мэдэгдэл явуулахгүй; системээс API-аар шалгана.\n- `ebarimt.mode`:\n  - `DISABLED`: баримт гаргахгүй.\n  - `PER_PAYMENT`: нэхэмжлэх төлөгдөх бүрт баримт автоматаар гарна.\n  - `MANUAL`: зөвхөн `/api/v1/receipts`-ээр гаргана.\n- `ebarimt.posApiUrl`: тухайн ТТД-ийн PosAPI 3.0 суусан хаяг.\n- `ebarimt.classificationCode`: бараа үйлчилгээний 7 оронтой ангиллын код. Баримтын мөрөнд заагаагүй үед ашиглана.\n- `ebarimt.cityTaxRate`: НХАТ хувь (0, 1, 2). Үнэд багтсан гэж тооцно.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{merchantCode}}\",\n  \"name\": \"Тест систем\",\n  \"webhookUrl\": \"{{merchantWebhookUrl}}\",\n  \"ebarimt\": {\n    \"mode\": \"PER_PAYMENT\",\n    \"posApiUrl\": \"{{posApiUrl}}\",\n    \"merchantTin\": \"{{merchantTin}}\",\n    \"posNo\": \"10012345\",\n    \"districtCode\": \"25\",\n    \"branchNo\": \"001\",\n    \"classificationCode\": \"3600100\",\n    \"defaultItemName\": \"Байгалийн ус\",\n    \"measureUnit\": \"литр\",\n    \"taxType\": \"VAT_ABLE\",\n    \"cityTaxRate\": 0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.environment.set('merchantId', b.merchant.id);",
+                  "pm.environment.set('apiKey', b.apiKey);",
+                  "pm.environment.set('webhookSecret', b.webhookSecret);",
+                  "pm.test('apiKey буцсан', () => pm.expect(b.apiKey).to.match(/^pk_/));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.environment.get('merchantCode') || pm.info.iteration === 0 && pm.environment.get('merchantCodeAuto') !== 'false') {",
+                  "  pm.environment.set('merchantCode', 'test-' + Date.now());",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Merchant жагсаалт",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants"
+              ]
+            },
+            "description": "Бүх бүртгэлтэй merchant. Нууц мэдээлэл агуулахгүй."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Merchant дэлгэрэнгүй",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants",
+                "{{merchantId}}"
+              ]
+            },
+            "description": "Нэг merchant-ийн тохиргоо, ebarimt тохиргоо."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Merchant шинэчлэх",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants",
+                "{{merchantId}}"
+              ]
+            },
+            "description": "Нэр, webhook URL, идэвхтэй эсэх, ebarimt тохиргоог шинэчилнэ.\n\n- `active: false` болговол тухайн системийн API key ажиллахаа болино.\n- `ebarimt` объектыг илгээвэл бүхэлд нь солигдоно.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Тест систем\",\n  \"webhookUrl\": \"{{merchantWebhookUrl}}\",\n  \"active\": true,\n  \"ebarimt\": {\n    \"mode\": \"PER_PAYMENT\",\n    \"posApiUrl\": \"{{posApiUrl}}\",\n    \"merchantTin\": \"{{merchantTin}}\",\n    \"posNo\": \"10012345\",\n    \"districtCode\": \"25\",\n    \"branchNo\": \"001\",\n    \"classificationCode\": \"3600100\",\n    \"defaultItemName\": \"Байгалийн ус\",\n    \"measureUnit\": \"литр\",\n    \"taxType\": \"VAT_ABLE\",\n    \"cityTaxRate\": 0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "API key шинэчлэх (rotate)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/rotate-api-key",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants",
+                "{{merchantId}}",
+                "rotate-api-key"
+              ]
+            },
+            "description": "Шинэ API key үүсгэнэ. Хуучин түлхүүр **тэр даруй** ажиллахаа болино. Шинэ түлхүүр нь `apiKey` хувьсагчид хадгалагдана."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.environment.set('apiKey', pm.response.json().apiKey);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Webhook secret шинэчлэх (rotate)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/rotate-webhook-secret",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants",
+                "{{merchantId}}",
+                "rotate-webhook-secret"
+              ]
+            },
+            "description": "Merchant руу илгээх webhook-ийн гарын үсгийн нууцыг солино. Клиент системд шинэ утгыг тохируулах хэрэгтэй."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.environment.set('webhookSecret', pm.response.json().webhookSecret);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Provider тохиргоонууд",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "merchants",
+                "{{merchantId}}",
+                "providers"
+              ]
+            },
+            "description": "Merchant-ийн бүх provider тохиргоо. Нууц утгууд `********` болж харагдана."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Provider тохиргоо хадгалах",
+          "description": "Төлбөрийн хэрэгсэл бүрийн гэрээний мэдээлэл. `<...>` гэсэн утгуудыг банк эсвэл provider-оос авсан бодит утгаар солино.\n\n`baseUrl` нь заавал `http(s)://` хэлбэрийн бүтэн URL байна (үгүй бол `400 invalid_config`).\n\nCallback URL-ийг сервис өөрөө `{PAYMENT_PUBLIC_BASE_URL}/webhooks/{provider}/{invoiceId}` хэлбэрээр үүсгэдэг тул provider талд тусад нь бүртгүүлэх шаардлагагүй.",
+          "item": [
+            {
+              "name": "QPAY тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/QPAY",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "QPAY"
+                  ]
+                },
+                "description": "**QPay v2 merchant API.**\n\n`baseUrl`, `username`, `password`, `invoiceCode` заавал. `invoiceReceiverCode` сонголттой (default `terminal`). Token-ийг сервис өөрөө авч cache-лэнэ.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://merchant.qpay.mn/v2\",\n    \"username\": \"<QPAY_USERNAME>\",\n    \"password\": \"<QPAY_PASSWORD>\",\n    \"invoiceCode\": \"<QPAY_INVOICE_CODE>\",\n    \"invoiceReceiverCode\": \"terminal\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "HIPAY тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/HIPAY",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "HIPAY"
+                  ]
+                },
+                "description": "**HiPay checkout.**\n\n`baseUrl`, `token`, `entityId` заавал.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://api.hipay.mn\",\n    \"token\": \"<HIPAY_TOKEN>\",\n    \"entityId\": \"<HIPAY_ENTITY_ID>\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "GOLOMT_CARD тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/GOLOMT_CARD",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "GOLOMT_CARD"
+                  ]
+                },
+                "description": "**Голомт банкны e-commerce (картаар төлөх вэб хуудас).**\n\n`baseUrl`, `token`, `hmacKey` заавал. `paymentPageUrl` сонголттой.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://ecommerce.golomtbank.com/api\",\n    \"token\": \"<GOLOMT_TOKEN>\",\n    \"hmacKey\": \"<GOLOMT_HMAC_KEY>\",\n    \"paymentPageUrl\": \"https://ecommerce.golomtbank.com/payment/mn/\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "SOCIALPAY тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/SOCIALPAY",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "SOCIALPAY"
+                  ]
+                },
+                "description": "**Голомт банкны SocialPay deeplink. Голомттой ижил гэрээ, ижил түлхүүрүүд.**\n\n`baseUrl`, `token`, `hmacKey` заавал.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://ecommerce.golomtbank.com/api\",\n    \"token\": \"<GOLOMT_TOKEN>\",\n    \"hmacKey\": \"<GOLOMT_HMAC_KEY>\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TOKI тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/TOKI",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "TOKI"
+                  ]
+                },
+                "description": "**Toki third-party pay.**\n\n`baseUrl`, `merchantId`, `token` заавал. `apiKey`, `basicUsername`, `basicPassword` сонголттой.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://toki-api.example.mn/third-party-pay\",\n    \"merchantId\": \"<TOKI_MERCHANT_ID>\",\n    \"token\": \"<TOKI_BASIC_TOKEN>\",\n    \"apiKey\": \"third_party_pay\",\n    \"basicUsername\": \"third_pary_pay\",\n    \"basicPassword\": \"third_pary_pay\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "MONPAY тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/MONPAY",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "MONPAY"
+                  ]
+                },
+                "description": "**MonPay branch invoice.**\n\n`baseUrl`, `token`, `receiver` заавал.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://monpay-api.example.mn/rest/branch\",\n    \"token\": \"<MONPAY_TOKEN>\",\n    \"receiver\": \"<MONPAY_RECEIVER>\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "DIGIPAY тохиргоо хадгалах",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/v1/merchants/{{merchantId}}/providers/DIGIPAY",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "v1",
+                    "merchants",
+                    "{{merchantId}}",
+                    "providers",
+                    "DIGIPAY"
+                  ]
+                },
+                "description": "**Хаан банкны DigiPay.**\n\n`baseUrl`, `clientId`, `clientSecret`, `merchantId`, `terminalId` заавал. `merchantName` сонголттой.\n\n- `enabled: false` болговол энэ хэрэгслээр шинэ нэхэмжлэх үүсгэх боломжгүй болно.\n- Хариунд нууц утгууд `********` болж харагдана.\n- Дахин хадгалахдаа нууц утгыг `********` гэж үлдээвэл өмнөх утга нь хэвээр хадгалагдана. Ингэснээр нууц үгийг дахин бичих шаардлагагүй.\n- Бүх тохиргоо DB-д AES-256-GCM-ээр шифрлэгдэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"enabled\": true,\n  \"config\": {\n    \"baseUrl\": \"https://api-wallet.khanbank.com\",\n    \"clientId\": \"<DIGIPAY_CLIENT_ID>\",\n    \"clientSecret\": \"<DIGIPAY_CLIENT_SECRET>\",\n    \"merchantId\": \"<DIGIPAY_MERCHANT_ID>\",\n    \"terminalId\": \"<DIGIPAY_TERMINAL_ID>\",\n    \"merchantName\": \"MERCHANT\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "auth": {
+        "type": "apikey",
+        "apikey": [
+          {
+            "key": "key",
+            "value": "X-Admin-Key",
+            "type": "string"
+          },
+          {
+            "key": "value",
+            "value": "{{adminKey}}",
+            "type": "string"
+          },
+          {
+            "key": "in",
+            "value": "header",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "2. Төлбөр — Нэхэмжлэх",
+      "description": "Клиент системээс төлбөрийн нэхэмжлэх үүсгэх, төлөв шалгах.\n\n**Нэвтрэх:** `X-API-Key: {{apiKey}}` (merchant бүртгэхэд авсан түлхүүр).\n\n**Урсгал:**\n1. `POST /api/v1/invoices`: хариунд QR, deeplink эсвэл төлбөрийн хуудасны холбоос ирнэ. Үүнийг хэрэглэгчид харуулна.\n2. Хэрэглэгч төлнө. Provider нь манай `/webhooks/...` руу мэдэгдэнэ. Сервис provider-оос **заавал шалгаж** байж PAID болгоно.\n3. Клиент системийн `webhookUrl` руу `invoice.paid` мэдэгдэл очно. Эсвэл `GET /api/v1/invoices/{id}`-ээр шалгаж болно.\n4. `returnUrl` өгсөн бол хэрэглэгч төлбөрийн дараа `returnUrl?invoiceId=..&externalRef=..&status=PAID` руу буцна.\n\n**Чухал:**\n- `externalRef` нь таны системийн давтагдашгүй дугаар (захиалга, гүйлгээний id).\n  - Ижил `externalRef`-ээр дахин дуудвал **шинэ нэхэмжлэх үүсэхгүй**, өмнөхийг буцаана. Сүлжээний алдааны үед дахин илгээхэд аюулгүй.\n  - Ижил `externalRef`-тэй боловч өөр дүн эсвэл provider-тэй бол `409 duplicate_external_ref`.\n- `amount` нь төгрөгөөр, бүхэл тоо.\n- Төлөвүүд:\n  - `PENDING`: төлөгдөөгүй.\n  - `PAID`: төлөгдсөн (эцсийн төлөв).\n  - `FAILED`, `EXPIRED`, `CANCELLED`: хожуу төлөгдвөл `PAID` болж болно.",
+      "item": [
+        {
+          "name": "Идэвхтэй төлбөрийн хэрэгслүүд",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "providers"
+              ]
+            },
+            "description": "Энэ merchant-д тохируулсан, идэвхтэй provider-уудын жагсаалт. Төлбөрийн сонголт харуулахад ашиглана."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэхэмжлэх үүсгэх (SANDBOX)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices"
+              ]
+            },
+            "description": "Тест нэхэмжлэх. Жинхэнэ мөнгө хөдлөхгүй. Зөвхөн сервис `PAYMENT_SANDBOX_ENABLED=true` үед ажиллана.\n\nХариуны `paymentUrl` руу POST хийвэл (`4. Sandbox` хэсэг) төлөгдсөнд тооцогдоно.\n\n**Талбарууд:**\n- `provider`: QPAY, HIPAY, GOLOMT_CARD, SOCIALPAY, TOKI, MONPAY, DIGIPAY, SANDBOX.\n- `externalRef`: таны системийн давтагдашгүй дугаар.\n- `amount`: төгрөг, бүхэл тоо.\n- `description`: нэхэмжлэхийн тайлбар. Хоосон бол `externalRef` ашиглана.\n- `returnUrl`: төлбөрийн дараа хэрэглэгчийг буцаах хуудас (сонголттой).\n- `metadata`: дурын JSON. `invoice.paid` мэдэгдэлд яг хэвээрээ буцаж ирнэ (жишээ нь accountId, cardNumber).\n- `options`: provider-ийн нэмэлт параметр (сонголттой).\n- `receipt`: И-баримтын өгөгдөл (сонголттой, доорх жишээнүүдийг үз).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"SANDBOX\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.environment.set('invoiceId', b.id);",
+                  "pm.test('PENDING', () => pm.expect(b.status).to.eql('PENDING'));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('externalRef', 'order-' + Date.now());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Дахин илгээх — ижил externalRef (idempotent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices"
+              ]
+            },
+            "description": "Өмнөх хүсэлтийг яг ижлээр нь дахин илгээнэ. **Шинэ нэхэмжлэх үүсэхгүй**, өмнөх нэхэмжлэх буцна.\n\nTimeout эсвэл сүлжээний алдааны дараа дахин оролдоход аюулгүй гэдгийг харуулах жишээ.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"SANDBOX\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test('Ижил нэхэмжлэх буцсан', () => pm.expect(pm.response.json().id).to.eql(pm.environment.get('invoiceId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэхэмжлэх үүсгэх — И-баримттай (B2C, иргэн)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices"
+              ]
+            },
+            "description": "Merchant `PER_PAYMENT` горимтой үед төлөгдмөгц И-баримт автоматаар гарна.\n\n- `receipt.consumerNo`: иргэний ebarimt дугаар (8 орон). Хоосон бол сугалаатай энгийн баримт гарна.\n- `receipt.items` заагаагүй бол merchant-ийн `defaultItemName` болон `classificationCode`-оор нэхэмжлэхийн дүнгээр нэг мөр гарна.\n- Баримт гарахад `receipt.issued` мэдэгдэл очно: ДДТД, сугалаа, QR өгөгдөл агуулна.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"SANDBOX\",\n  \"externalRef\": \"{{externalRef2}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  },\n  \"receipt\": {\n    \"type\": \"B2C_RECEIPT\",\n    \"consumerNo\": \"12345678\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.environment.set('invoiceId2', pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('externalRef2', 'order-' + Date.now());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэхэмжлэх үүсгэх — И-баримттай (B2B, байгууллага, олон мөр)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices"
+              ]
+            },
+            "description": "Байгууллагад баримт гаргах.\n\n- `customerTin`: худалдан авагчийн ТТД, заавал. Регистрээс ТТД олохдоо `3. И-баримт → ТТД лавлах`-ийг ашиглана.\n- `items[].unitPrice`: **НӨАТ, НХАТ багтсан** нэгж үнэ. Сервис татварыг задлан тооцоолно.\n- Мөрүүдийн нийлбэр (`quantity × unitPrice`) нь `amount`-тай тэнцүү байх ёстой. Тэнцүү биш бол `400 receipt_amount_mismatch`.\n- `paymentCode`: `PAYMENT_CARD` (default) эсвэл `CASH`.\n- `taxType`: `VAT_ABLE` (default), `VAT_FREE`, `VAT_ZERO`, `NOT_VAT`. `VAT_FREE`/`VAT_ZERO` үед `taxProductCode` (3 орон) хэрэгтэй.\n- `districtCode`, `branchNo`: салбар бүрээр merchant-ийн default-ийг дарж бичнэ (сонголттой).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"SANDBOX\",\n  \"externalRef\": \"{{externalRef3}}\",\n  \"amount\": 16500,\n  \"description\": \"Ус түгээлт\",\n  \"receipt\": {\n    \"type\": \"B2B_RECEIPT\",\n    \"customerTin\": \"12345678901\",\n    \"paymentCode\": \"PAYMENT_CARD\",\n    \"items\": [\n      {\n        \"name\": \"Байгалийн ус\",\n        \"quantity\": 1000,\n        \"unitPrice\": 11,\n        \"measureUnit\": \"литр\",\n        \"classificationCode\": \"3600100\"\n      },\n      {\n        \"name\": \"Ус зөөвөрлөлт\",\n        \"quantity\": 1,\n        \"unitPrice\": 5500,\n        \"measureUnit\": \"ш\"\n      }\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.environment.set('invoiceId3', pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('externalRef3', 'order-' + Date.now());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэхэмжлэх авах",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices/{{invoiceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices",
+                "{{invoiceId}}"
+              ]
+            },
+            "description": "Нэхэмжлэхийн одоогийн төлөв. Provider руу хандахгүй, DB-ээс уншина.\n\n`PAID` болсон бол `paidAmount`, `paidAt`, `providerTxnId`, `receiptId` (баримт үүссэн бол) ирнэ."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "externalRef-ээр хайх",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices?externalRef={{externalRef}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices"
+              ],
+              "query": [
+                {
+                  "key": "externalRef",
+                  "value": "{{externalRef}}",
+                  "description": "Таны системийн дугаар"
+                }
+              ]
+            },
+            "description": "Өөрийн системийн дугаараар нэхэмжлэх олох. Жишээ нь invoiceId-аа хадгалаагүй үед."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Төлөв шалгах (provider-оос)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices/{{invoiceId}}/check",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices",
+                "{{invoiceId}}",
+                "check"
+              ]
+            },
+            "description": "Provider-ийн API-аас шууд шалгаж, төлөгдсөн бол PAID болгоно.\n\nХэрэглэгч \"Би төлсөн\" товч дарах үед ашиглана. Webhook хоцорсон эсвэл алдагдсан тохиолдолд ч сервис минут тутам өөрөө шалгадаг."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэхэмжлэх цуцлах",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices/{{invoiceId3}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices",
+                "{{invoiceId3}}",
+                "cancel"
+              ]
+            },
+            "description": "PENDING нэхэмжлэхийг цуцална. Боломжтой бол provider талд ч цуцална (QPay).\n\n- Цуцлахаас өмнө provider-оос шалгадаг тул аль хэдийн төлөгдсөн бол `409 already_paid`.\n- Цуцлагдсаны дараа хожуу төлөгдвөл PAID болно, мөнгө алдагдахгүй."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Provider бүрийн жишээ",
+          "description": "Төлбөрийн хэрэгсэл бүрийн нэхэмжлэх. Тухайн provider-ийн тохиргоо хадгалагдсан байх ёстой (`1. Admin → Provider тохиргоо хадгалах`).\n\n**Хариуд юу ирэх вэ:**\n\n| Provider | Хариунд ирэх | Хэрэглэгчид юуг харуулах вэ |\n|---|---|---|\n| QPAY | `qrText`, `qrImage`, `shortUrl`, `deeplinks[]` | QR зураг, эсвэл банкны аппуудын жагсаалт |\n| HIPAY | `qrText`, `deeplink` | QR эсвэл `hipaywallet://` холбоос |\n| GOLOMT_CARD | `paymentUrl` | Картын мэдээлэл оруулах вэб хуудас |\n| SOCIALPAY | `paymentUrl`, `deeplink` | SocialPay апп руу шилжих холбоос |\n| TOKI | `deeplink` | Toki апп руу шилжих холбоос |\n| MONPAY | `deeplink` | MonPay төлбөрийн хуудас |\n| DIGIPAY | `deeplink` | DigiPay апп/хуудас |",
+          "item": [
+            {
+              "name": "QPAY нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "QPAY хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"QPAY\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "HIPAY нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "HIPAY хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"HIPAY\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "GOLOMT_CARD нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "GOLOMT_CARD хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"GOLOMT_CARD\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "SOCIALPAY нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "SOCIALPAY хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"SOCIALPAY\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TOKI нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "TOKI хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"TOKI\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "MONPAY нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "MONPAY хэрэгслээр нэхэмжлэх үүсгэнэ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"MONPAY\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "DIGIPAY нэхэмжлэх",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/invoices",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ]
+                },
+                "description": "DIGIPAY хэрэгслээр нэхэмжлэх үүсгэнэ.\n\n`options.userToken`: DigiPay mini app дотроос хэрэглэгчийн token-оор үүсгэх үед. Хоосон бол merchant-ийн app token ашиглана.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"provider\": \"DIGIPAY\",\n  \"externalRef\": \"{{externalRef}}\",\n  \"amount\": 5000,\n  \"description\": \"Цэнэглэлт\",\n  \"returnUrl\": \"https://shop.example.mn/payment/result\",\n  \"metadata\": {\n    \"accountId\": \"A-1001\"\n  },\n  \"options\": {\n    \"userToken\": \"<DIGIPAY_USER_TOKEN>\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code === 200) pm.environment.set('providerInvoiceId', pm.response.json().id);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.environment.set('externalRef', 'order-' + Date.now());"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "auth": {
+        "type": "apikey",
+        "apikey": [
+          {
+            "key": "key",
+            "value": "X-API-Key",
+            "type": "string"
+          },
+          {
+            "key": "value",
+            "value": "{{apiKey}}",
+            "type": "string"
+          },
+          {
+            "key": "in",
+            "value": "header",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "3. И-баримт",
+      "description": "И-баримт (PosAPI 3.0) гаргах, буцаах, лавлагаа авах. Нэхэмжлэхгүйгээр шууд ашиглаж болно: бэлэн төлбөр, сарын нэгтгэл, өөр системээр хийгдсэн төлбөр г.м.\n\n**Нэвтрэх:** `X-API-Key: {{apiKey}}`.\n\n**Шаардлага:** merchant-ийн `ebarimt.mode` нь `MANUAL` эсвэл `PER_PAYMENT`, мөн `posApiUrl`, `merchantTin`, `posNo`, `districtCode`, `branchNo` тохируулагдсан байх.\n\n**Баримтын төлөв:**\n- `PENDING`: гаргахаар хүлээгдэж байна.\n- `ISSUED`: гарсан.\n- `FAILED`: 6 удаа оролдоод бүтэлгүйтсэн.\n- `RETURNED`: буцаагдсан.\n\nPosAPI түр ажиллахгүй байсан ч баримт алдагдахгүй. 1м, 5м, 15м, 1ц, 3ц, 6ц завсартай автоматаар дахин оролдоно.\n\n**Татвар:** үнэд багтсан дүнгээс задална.\n- `VAT_ABLE`: НӨАТ = дүн × 10 / 110 (НХАТ-гүй үед)",
+      "item": [
+        {
+          "name": "Баримт гаргах — B2C (иргэн, бэлэн)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts"
+              ]
+            },
+            "description": "Нэхэмжлэхгүй баримт. Үүсгээд PosAPI руу шууд илгээнэ. Хариунд `ddtd`, `lottery`, `qrData` ирнэ.\n\n- `externalRef`: давтагдашгүй дугаар. Ижил дугаараар дахин дуудвал өмнөх баримт буцна, давхар баримт гарахгүй.\n- `amount`: нийт дүн. `items` өгсөн бол нийлбэртэй нь тэнцүү байх ёстой.\n- `receipt.consumerNo`: иргэний ebarimt дугаар (сонголттой).\n- `receipt.items` заагаагүй бол merchant-ийн default нэр болон ангиллаар нэг мөр гарна.\n\n`qrData`-г QR код болгож, `lottery`-ийн хамт хэвлэх эсвэл дэлгэцэнд харуулна.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalRef\": \"{{receiptRef}}\",\n  \"amount\": 5500,\n  \"receipt\": {\n    \"type\": \"B2C_RECEIPT\",\n    \"paymentCode\": \"CASH\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.environment.set('receiptId', b.id);",
+                  "pm.test('Баримт гарсан', () => pm.expect(b.status).to.eql('ISSUED'));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('receiptRef', 'order-' + Date.now());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Баримт гаргах — B2B сарын нэгтгэл",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts"
+              ]
+            },
+            "description": "Байгууллагад сарын нийт хэрэглээгээр нэг баримт гаргах жишээ. Одоо `skm-service`-ийн сарын ebarimt үүнийг орлоно.\n\n- `externalRef`-д `<сар>-<харилцагч>` гэх мэт давтагдашгүй утга өгвөл нэг сард давхар гарахаас сэргийлнэ.\n- `customerTin` заавал.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalRef\": \"{{receiptRefB2b}}\",\n  \"amount\": 11000,\n  \"receipt\": {\n    \"type\": \"B2B_RECEIPT\",\n    \"customerTin\": \"12345678901\",\n    \"items\": [\n      {\n        \"name\": \"Байгалийн ус (9-р сар)\",\n        \"quantity\": 1000,\n        \"unitPrice\": 11,\n        \"measureUnit\": \"литр\"\n      }\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('receiptRefB2b', '2026-09-cust-' + Date.now());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Баримт авах",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts/{{receiptId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts",
+                "{{receiptId}}"
+              ]
+            },
+            "description": "Баримтын төлөв, ДДТД, сугалаа, QR өгөгдөл. `FAILED` үед `lastError` талбарт шалтгаан бичигдэнэ."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "externalRef-ээр хайх",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts?externalRef={{receiptRef}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts"
+              ],
+              "query": [
+                {
+                  "key": "externalRef",
+                  "value": "{{receiptRef}}"
+                }
+              ]
+            },
+            "description": "Өөрийн дугаараар баримт олох."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Баримт буцаах",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts/{{receiptId}}/return",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts",
+                "{{receiptId}}",
+                "return"
+              ]
+            },
+            "description": "Гарсан (`ISSUED`) баримтыг буцаана (PosAPI DELETE). Төлбөр буцаах, захиалга цуцлах үед ашиглана.\n\nТөлөв `RETURNED` болж, `receipt.returned` мэдэгдэл очно."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test('RETURNED', () => pm.expect(pm.response.json().status).to.eql('RETURNED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Баримт дахин илгээх (FAILED)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/receipts/{{receiptId}}/retry",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "receipts",
+                "{{receiptId}}",
+                "retry"
+              ]
+            },
+            "description": "`FAILED` болсон баримтыг алдааг нь зассаны дараа (жишээ нь PosAPI сэргэсэн, тохиргоо засагдсан) дахин илгээнэ.\n\n`FAILED` биш баримт дээр дуудвал `409 invalid_state`."
+          }
+        },
+        {
+          "name": "PosAPI төлөв",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ebarimt/posapi/info",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ebarimt",
+                "posapi",
+                "info"
+              ]
+            },
+            "description": "Merchant-ийн PosAPI-ийн мэдээлэл: үлдсэн сугалааны тоо, сүүлд татварын систем рүү илгээсэн огноо, оператор.\n\nСугалаа дуусах эсвэл илгээлт хоцрохоос сэргийлж хянахад ашиглана."
+          }
+        },
+        {
+          "name": "PosAPI өгөгдөл илгээх (sendData)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ebarimt/posapi/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ebarimt",
+                "posapi",
+                "send"
+              ]
+            },
+            "description": "PosAPI-д хуримтлагдсан баримтуудыг татварын нэгдсэн систем рүү **одоо** илгээнэ.\n\nСервис өдөр бүр 23:00 цагт автоматаар илгээдэг. Гараар зөвхөн шаардлагатай үед дуудна."
+          }
+        },
+        {
+          "name": "ТТД лавлах (регистрээр)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ebarimt/taxpayers/:regNo",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ebarimt",
+                "taxpayers",
+                ":regNo"
+              ],
+              "variable": [
+                {
+                  "key": "regNo",
+                  "value": "6235972",
+                  "description": "Байгууллагын регистрийн дугаар"
+                }
+              ]
+            },
+            "description": "Байгууллагын регистрийн дугаараар ТТД болон нэр, НӨАТ төлөгч эсэхийг ebarimt.mn-ээс авна.\n\nB2B баримтын `customerTin`-ийг олох, хэрэглэгчийн оруулсан регистрийг шалгахад ашиглана.\n\n**Хариу:** `tin` (ТТД лавлагаа), `info` (татвар төлөгчийн мэдээлэл)."
+          }
+        },
+        {
+          "name": "Иргэний ebarimt дугаар шалгах",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ebarimt/consumers/:consumerNo",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ebarimt",
+                "consumers",
+                ":consumerNo"
+              ],
+              "variable": [
+                {
+                  "key": "consumerNo",
+                  "value": "12345678",
+                  "description": "Иргэний ebarimt дугаар (8 орон)"
+                }
+              ]
+            },
+            "description": "Иргэний ebarimt бүртгэлийн дугаар (8 орон) хүчинтэй эсэхийг шалгана (`{\"valid\": true}`).\n\nСервис дээр Easy Register тохируулаагүй бол үргэлж `true` буцаана."
+          }
+        },
+        {
+          "name": "Аймаг/дүүргийн кодууд",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ebarimt/branches",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ebarimt",
+                "branches"
+              ]
+            },
+            "description": "ebarimt.mn-ийн аймаг/дүүрэг, хороо/сумын кодын жагсаалт. Merchant-ийн `districtCode`-ийг тохируулахад ашиглана."
+          }
+        }
+      ],
+      "auth": {
+        "type": "apikey",
+        "apikey": [
+          {
+            "key": "key",
+            "value": "X-API-Key",
+            "type": "string"
+          },
+          {
+            "key": "value",
+            "value": "{{apiKey}}",
+            "type": "string"
+          },
+          {
+            "key": "in",
+            "value": "header",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "4. Sandbox — Тест төлбөр",
+      "description": "Жинхэнэ мөнгө хөдлөхгүйгээр бүх урсгалыг туршина: нэхэмжлэх → төлбөр → И-баримт → webhook мэдэгдэл.\n\nЗөвхөн сервис `PAYMENT_SANDBOX_ENABLED=true` үед ажиллана. **Production-д унтраалттай байх ёстой.** Нэвтрэх шаардлагагүй.",
+      "item": [
+        {
+          "name": "SANDBOX нэхэмжлэх төлөх",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sandbox/invoices/{{invoiceId}}/pay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sandbox",
+                "invoices",
+                "{{invoiceId}}",
+                "pay"
+              ]
+            },
+            "description": "`2. Төлбөр → Нэхэмжлэх үүсгэх (SANDBOX)`-аар үүссэн нэхэмжлэхийг төлөгдсөн болгоно.\n\nЖинхэнэ provider-ийн урсгалтай яг адил ажиллана:\n- Нэхэмжлэх PAID болно.\n- Merchant `PER_PAYMENT` горимтой бол И-баримт үүснэ.\n- `invoice.paid` мэдэгдэл merchant-ийн `webhookUrl` руу очно.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test('PAID', () => pm.expect(pm.response.json().status).to.eql('PAID'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SANDBOX нэхэмжлэх төлөх (B2C баримттай)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sandbox/invoices/{{invoiceId2}}/pay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sandbox",
+                "invoices",
+                "{{invoiceId2}}",
+                "pay"
+              ]
+            },
+            "description": "И-баримттай нэхэмжлэхийг төлөх. Хэдэн секундийн дараа `Нэхэмжлэх авах`-аар `receiptId`-г харна.",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Төлөгдсөнийг шалгах",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/invoices/{{invoiceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "invoices",
+                "{{invoiceId}}"
+              ]
+            },
+            "description": "SANDBOX төлбөрийн дараах төлөв: `PAID`.",
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                {
+                  "key": "key",
+                  "value": "X-API-Key",
+                  "type": "string"
+                },
+                {
+                  "key": "value",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                },
+                {
+                  "key": "in",
+                  "value": "header",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "pm.test('PAID', () => pm.expect(pm.response.json().status).to.eql('PAID'));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "auth": {
+        "type": "noauth"
+      }
+    },
+    {
+      "name": "5. Provider callback (лавлагаа)",
+      "description": "Эдгээр endpoint-уудыг **provider-ууд (QPay, HiPay, ...) дууддаг**. Клиент систем дуудах шаардлагагүй. Тест болон алдаа шалгахад зориулав.\n\n- Callback URL-ийг сервис нэхэмжлэх бүрт өөрөө үүсгэж provider-т дамжуулдаг: `{PAYMENT_PUBLIC_BASE_URL}/webhooks/{provider}/{invoiceId}`.\n- Ирсэн body-д **итгэхгүй**: хуурамч \"төлөгдсөн\" хүсэлт ирсэн ч provider-ийн API-аас шалгаж байж PAID болгоно.\n- `?redirect=1` үед хэрэглэгчийг merchant-ийн `returnUrl` руу 302-оор буцаана.",
+      "item": [
+        {
+          "name": "Provider callback (POST)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/sandbox/{{invoiceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                "sandbox",
+                "{{invoiceId}}"
+              ]
+            },
+            "description": "Provider-ийн server-to-server мэдэгдлийг дуурайна. Хариу: `{\"status\": \"PAID|PENDING|...\"}`.\n\nBody ямар ч байсан provider-оос шалгасан бодит төлөвийг буцаана.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"SUCCESS\",\n  \"note\": \"Энэ body-г сервис үл тооно\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Хэрэглэгчийг буцаах (redirect)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/sandbox/{{invoiceId}}?redirect=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                "sandbox",
+                "{{invoiceId}}"
+              ],
+              "query": [
+                {
+                  "key": "redirect",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Хэрэглэгч төлбөрийн дараа browser-оор ирэхэд `returnUrl?invoiceId=..&externalRef=..&status=..` руу 302 redirect хийнэ.\n\nPostman-д redirect дагахгүй тохиргоогоор `Location` header-ийг харна.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          }
+        }
+      ],
+      "auth": {
+        "type": "noauth"
+      }
+    },
+    {
+      "name": "6. Сервисийн төлөв",
+      "description": "Мониторинг болон баримт бичиг. Нэвтрэх шаардлагагүй.",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "Сервис болон DB ажиллаж байгаа эсэх. Load balancer, k8s probe-д ашиглана.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OpenAPI spec",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v3/api-docs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v3",
+                "api-docs"
+              ]
+            },
+            "description": "Бүрэн OpenAPI 3 тодорхойлолт. Browser-оор `{{baseUrl}}/swagger-ui.html` нээж үзэж болно.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "auth": {
+        "type": "noauth"
+      }
+    }
+  ],
+  "variable": []
+}
