@@ -1,0 +1,17 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:payment;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  flyway:
+    locations: classpath:db/migration/postgresql
+
+payment:
+  public-base-url: http://localhost:8090
+  admin-api-key: test-admin-key
+  encryption-key: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  sandbox-enabled: true
+  scheduling-enabled: false
+
+ebarimt:
+  info-api-url: http://localhost:1
