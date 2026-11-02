@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: ${DB_URL:jdbc:h2:file:./data/payment;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH}
+    username: ${DB_USERNAME:sa}
+    password: ${DB_PASSWORD:}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+qpay:
+  # Sandbox: https://merchant-sandbox.qpay.mn, Production: https://merchant.qpay.mn
+  base-url: ${QPAY_BASE_URL:https://merchant-sandbox.qpay.mn}
+  client-id: ${QPAY_CLIENT_ID}
+  client-secret: ${QPAY_CLIENT_SECRET}
+  invoice-code: ${QPAY_INVOICE_CODE}
+  # QPay-ээс хандах боломжтой (public) энэ сервисийн хаяг, жишээ нь https://pay.example.mn
+  callback-base-url: ${QPAY_CALLBACK_BASE_URL}
+  branch-code: ${QPAY_BRANCH_CODE:}
+  connect-timeout: 10s
+  read-timeout: 30s
+  token-expiry-skew: 60s
+  ebarimt:
+    auto-create: ${QPAY_EBARIMT_AUTO_CREATE:false}
+    receiver-type: ${QPAY_EBARIMT_RECEIVER_TYPE:CITIZEN}

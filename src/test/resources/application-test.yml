@@ -1,0 +1,8 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:payment-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+qpay:
+  client-id: TEST_MERCHANT
+  client-secret: secret
+  invoice-code: TEST_INVOICE
+  callback-base-url: https://pay.example.mn
