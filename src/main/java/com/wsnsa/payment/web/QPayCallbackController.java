@@ -2,6 +2,8 @@ package com.wsnsa.payment.web;
 
 import com.wsnsa.payment.payment.PaymentNotFoundException;
 import com.wsnsa.payment.payment.PaymentService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -16,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>QPay-ийн шаардлага: HTTP 200, body нь яг "SUCCESS" байх ёстой. Callback-ийн агуулгад итгэхгүй -
  * төлөвийг заавал QPay payment/check API-гаар баталгаажуулна.
  */
+@Tag(name = "QPay callback", description = "Зөвхөн QPay дуудна")
 @RestController
 public class QPayCallbackController {
 
@@ -28,6 +31,7 @@ public class QPayCallbackController {
         this.paymentService = paymentService;
     }
 
+    @Operation(summary = "QPay төлбөрийн callback", description = "QPay төлбөр төлөгдөхөд дуудна. Үргэлж 200 SUCCESS буцаана.")
     @RequestMapping(path = "/api/v1/qpay/callback", method = {RequestMethod.GET, RequestMethod.POST},
             produces = MediaType.TEXT_PLAIN_VALUE)
     public String callback(@RequestParam(name = "payment_id", required = false) String paymentId,
