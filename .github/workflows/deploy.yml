@@ -56,7 +56,7 @@ jobs:
           for ($i = 0; $i -lt 30; $i++) {
             try {
               $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-              if ($r.StatusCode -eq 200) { Write-Host "UP: $($r.Content)"; exit 0 }
+              if ($r.StatusCode -eq 200) { Write-Host "payment-service is UP (HTTP $($r.StatusCode))"; exit 0 }
             } catch { }
             Start-Sleep -Seconds 5
           }
