@@ -118,6 +118,21 @@ class QPayTokenManagerTest {
     }
 
     @Test
+    void credentialsAreTrimmedBeforeUse() throws Exception {
+        QPayProperties padded = new QPayProperties(server.url("/").toString() + "/", " TEST_MERCHANT\n",
+                "secret\r\n", " TEST_INVOICE ", "https://pay.example.mn/", null, Duration.ofSeconds(2),
+                Duration.ofSeconds(2), Duration.ofSeconds(60), new QPayProperties.Ebarimt(false, "CITIZEN"));
+        assertThat(padded.invoiceCode()).isEqualTo("TEST_INVOICE");
+        assertThat(padded.callbackBaseUrl()).isEqualTo("https://pay.example.mn");
+        server.enqueue(token("access-1", NOW + 3600, "refresh-1", NOW + 7200));
+
+        QPayTestSupport.tokenManager(padded, clock).getAccessToken();
+
+        String expected = "Basic " + Base64.getEncoder().encodeToString("TEST_MERCHANT:secret".getBytes());
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo(expected);
+    }
+
+    @Test
     void supportsExpiresInAsDurationAndAsTimestamp() {
         assertThat(QPayTokenManager.toEpochSeconds(NOW + 100, NOW, Duration.ZERO)).isEqualTo(NOW + 100);
         assertThat(QPayTokenManager.toEpochSeconds(3600L, NOW, Duration.ZERO)).isEqualTo(NOW + 3600);

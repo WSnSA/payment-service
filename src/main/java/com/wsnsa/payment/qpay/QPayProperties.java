@@ -34,6 +34,24 @@ public record QPayProperties(
         @DefaultValue("60s") Duration tokenExpirySkew,
         @DefaultValue Ebarimt ebarimt) {
 
+    public QPayProperties {
+        // GitHub secret / env-д хуулж буулгахад орж ирдэг зай, мөр шилжилтийг арилгана
+        baseUrl = stripTrailingSlash(clean(baseUrl));
+        clientId = clean(clientId);
+        clientSecret = clean(clientSecret);
+        invoiceCode = clean(invoiceCode);
+        callbackBaseUrl = stripTrailingSlash(clean(callbackBaseUrl));
+        branchCode = clean(branchCode);
+    }
+
+    private static String clean(String value) {
+        return value == null ? null : value.strip();
+    }
+
+    private static String stripTrailingSlash(String value) {
+        return value == null ? null : value.replaceAll("/+$", "");
+    }
+
     /**
      * @param autoCreate    Төлбөр төлөгдмөгц и-баримтыг автоматаар үүсгэх эсэх
      * @param receiverType  Автоматаар үүсгэх үеийн хүлээн авагчийн төрөл (CITIZEN / COMPANY)

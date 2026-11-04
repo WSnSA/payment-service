@@ -39,6 +39,8 @@ public class QPayTokenManager {
         this.restClient = qpayRestClient;
         this.properties = properties;
         this.clock = clock;
+        log.info("QPay configured: base-url={}, client-id={}, invoice-code={}, callback-base-url={}",
+                properties.baseUrl(), properties.clientId(), properties.invoiceCode(), properties.callbackBaseUrl());
     }
 
     /** Хүчинтэй access token буцаана. Шаардлагатай бол refresh эсвэл шинээр авна. */
@@ -59,7 +61,14 @@ public class QPayTokenManager {
                     log.warn("QPay token refresh failed ({}), requesting a new token", e.getError());
                 }
             }
-            store(requestNewToken());
+            try {
+                store(requestNewToken());
+            } catch (QPayApiException e) {
+                log.error("QPay token request to {} failed for client-id '{}': {} {}. Check that the credentials "
+                        + "belong to this environment (sandbox vs production).", properties.baseUrl(),
+                        properties.clientId(), e.getStatus(), e.getError());
+                throw e;
+            }
             log.info("QPay access token obtained");
             return accessToken;
         } finally {
