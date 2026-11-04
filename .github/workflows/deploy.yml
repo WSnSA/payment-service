@@ -1,0 +1,69 @@
+name: Deploy payment-service
+
+# Commit message-д "#deploy" орсон үед 55 сервер (self-hosted Windows runner) дээр байршуулна.
+on:
+  push:
+    branches:
+      - main
+      - claude/festive-newton-0euodw
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-payment-service
+  cancel-in-progress: false
+
+env:
+  IMAGE: payment-service:latest
+  CONTAINER: payment-service
+  HOST_PORT: '9095'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Windows, X64, prod]
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '#deploy')
+    steps:
+      - uses: actions/checkout@v4
+
+      # Image-ийг сервер дээр шууд build хийнэ (Gradle build нь Docker дотор явагдана)
+      - name: Build Docker image
+        run: docker build --pull -t ${{ env.IMAGE }} .
+
+      - name: Stop and remove existing container
+        run: |
+          docker ps -a --quiet --filter "name=^${{ env.CONTAINER }}$" | ForEach-Object { docker rm -f $_ }
+
+      - name: Run Docker container
+        env:
+          QPAY_BASE_URL: ${{ vars.QPAY_BASE_URL || 'https://merchant-sandbox.qpay.mn' }}
+          QPAY_CLIENT_ID: ${{ secrets.QPAY_CLIENT_ID || 'TEST_MERCHANT' }}
+          QPAY_CLIENT_SECRET: ${{ secrets.QPAY_CLIENT_SECRET || '123456' }}
+          QPAY_INVOICE_CODE: ${{ secrets.QPAY_INVOICE_CODE || 'TEST_INVOICE' }}
+          QPAY_CALLBACK_BASE_URL: ${{ vars.QPAY_CALLBACK_BASE_URL || 'http://localhost:9095' }}
+          QPAY_BRANCH_CODE: ${{ vars.QPAY_BRANCH_CODE }}
+          QPAY_EBARIMT_AUTO_CREATE: ${{ vars.QPAY_EBARIMT_AUTO_CREATE || 'false' }}
+        run: |
+          docker run -d --name ${{ env.CONTAINER }} --restart always `
+            -p ${{ env.HOST_PORT }}:8080 `
+            -v payment-service-data:/app/data `
+            -e QPAY_BASE_URL -e QPAY_CLIENT_ID -e QPAY_CLIENT_SECRET -e QPAY_INVOICE_CODE `
+            -e QPAY_CALLBACK_BASE_URL -e QPAY_BRANCH_CODE -e QPAY_EBARIMT_AUTO_CREATE `
+            ${{ env.IMAGE }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Health check
+        run: |
+          $url = "http://localhost:${{ env.HOST_PORT }}/actuator/health"
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+              if ($r.StatusCode -eq 200) { Write-Host "payment-service is UP (HTTP $($r.StatusCode))"; exit 0 }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          docker logs --tail 200 ${{ env.CONTAINER }}
+          Write-Error "payment-service did not become healthy"
+          exit 1
+
+      - name: Cleanup old Docker images
+        if: always()
+        run: docker image prune -f
