@@ -97,3 +97,22 @@ QPay-д холбогдож чадаагүй бол `503`, буруу төлөв 
 - `qpay/` — QPay API v2 клиент (`QPayClient`), токен удирдлага (`QPayTokenManager`), DTO-ууд
 - `payment/` — `Payment` entity, `PaymentService` (бизнес логик)
 - `web/` — REST controller-ууд, QPay callback, алдааны боловсруулалт
+
+## Deploy (101 сервер)
+
+`.github/workflows/deploy.yml` нь `self-hosted, Windows, X64, prod` runner (101 сервер) дээр
+Docker image build хийж `payment-service` контейнерийг **9095** порт дээр асаана.
+Commit message-д `#deploy` орсон push (`main` эсвэл энэ PR-ын branch) deploy-г эхлүүлнэ.
+
+Repo → Settings → Secrets and variables → Actions:
+
+| Төрөл | Нэр | Жишээ |
+|---|---|---|
+| Secret | `QPAY_CLIENT_ID`, `QPAY_CLIENT_SECRET`, `QPAY_INVOICE_CODE` | QPay-ээс олгосон утга |
+| Variable | `QPAY_BASE_URL` | `https://merchant.qpay.mn` |
+| Variable | `QPAY_CALLBACK_BASE_URL` | `https://tn.usug.mn` |
+
+`QPAY_BASE_URL` нь credential-ийн орчинтой таарах ёстой: production credential-ийг sandbox
+руу илгээвэл QPay `NO_CREDENDIALS` буцаана. Callback зам
+`{QPAY_CALLBACK_BASE_URL}/api/v1/qpay/callback` нь гаднаас 9095 порт руу дамжиж байх ёстой.
+Swagger UI: `http://<server>:9095/swagger-ui.html`.
